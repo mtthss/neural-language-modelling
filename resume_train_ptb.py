@@ -1,24 +1,23 @@
 #!/usr/bin/env python
-"""Sample script of recurrent neural network language model.
+"""
+Sample script of recurrent neural network language model.
 Modifying the chainer tutorial code on recurrent networks
 The chainer tutorial in turn is ported from following implementation written in Torch.
 https://github.com/tomsercu/lstm
 """
-import argparse
-import random
-import math
 import sys
+import math
 import time
+import argparse
 
-import cPickle as pk
-import numpy as np
 import six
+import numpy as np
+import cPickle as pk
 
 import chainer
 from chainer import cuda
 import chainer.functions as F
 from chainer import optimizers
-
 
 # Parsing args
 parser = argparse.ArgumentParser()
@@ -27,14 +26,13 @@ parser.add_argument('--gpu', '-g', default=-1, type=int,
 args = parser.parse_args()
 mod = cuda if args.gpu >= 0 else np
 
-n_epoch = 30   # number of epochs
-n_units = 250  # number of units per layer
-batchsize = 20   # minibatch size
-bprop_len = 30   # length of truncated BPTT
-grad_clip = 5    # gradient norm threshold to clip
-
-# Prepare dataset (preliminary download dataset by ./download.py)
-vocab = {}
+n_epoch = 10        # number of epochs
+vector_size = 250
+n_units = 8      # number of units per layer
+batchsize = 1       # minibatch size
+bprop_len = 15      # length of truncated BPTT
+grad_clip = 5       # gradient norm threshold to clip
+vocab = {}          # vocab data structure
 
 def load_data(filename):
     global vocab, n_vocab
@@ -46,17 +44,40 @@ def load_data(filename):
         dataset[i] = vocab[word]
     return dataset
 
-train_data = load_data('duc-train.txt')
-valid_data = load_data('duc-dev.txt')
-test_data = load_data('duc-test.txt')
+train_data = load_data('./data/duc-train.txt')
+valid_data = load_data('./data/duc-dev.txt')
+test_data = load_data('./data/duc-test.txt')
 print('#vocab =', len(vocab))
 
-# save hyperparams
-pk.dump(vocab, open("./models_AdaGrad_BL30_res562699/vocab.pkl","wb"))
-pk.dump(n_units, open("./models_AdaGrad_BL30_res562699/units.pkl","wb"))
+# pickle unpickle
+pk.dump(vocab, open("./models_continue_supersmall/vocab.pkl","wb"))
+pk.dump(n_units, open("./models_continue_supersmall/units.pkl","wb"))
+old_model = pk.load(open("./models_continue/model2699.pkl","r"))
 
 # Prepare RNNLM model
-model = pk.load(open("./models/model562699.pkl","r"))
+model = chainer.FunctionSet(embed=F.EmbedID(len(vocab), vector_size),
+                            l1_x=F.Linear(vector_size, 4 * n_units),
+                            l1_h=F.Linear(n_units, 4 * n_units),
+                            l2_x=F.Linear(n_units, 4 * n_units),
+                            l2_h=F.Linear(n_units, 4 * n_units),
+                            l3=F.Linear(n_units, len(vocab)))
+
+# initilize params values
+count = 0
+for param in model.parameters:
+    if count==0:
+        param[:] = old_model.parameters[0]
+    else:
+        a = param.shape[0]
+        try:
+            b = param.shape[1]
+        except:
+            b = None
+        if b!=None:
+            param[:] = old_model.parameters[count][0:a, 0:b]
+        else:
+            param[:] = old_model.parameters[count][0:a]
+    count += 1
 
 # initialize gpu
 if args.gpu >= 0:
@@ -72,20 +93,14 @@ def forward_one_step(x_data, y_data, state, train=True):
     t = chainer.Variable(y_data, volatile=not train)
 
     h0 = model.embed(x)
-    h1_in = model.l1_x(F.dropout(h0, train=train)) + model.l1_h(state['h1'])
-
+    h1_in = model.l1_x(F.dropout(h0, train=True)) + model.l1_h(state['h1'])
     c1, h1 = F.lstm(state['c1'], h1_in)
-    #h2_in = model.l2_x(F.dropout(h1, train=train)) + model.l2_h(state['h2'])
-
-    #TODO
-    h2_in = model.l2_x(h1) + model.l2_h(state['h2'])
-
+    h2_in = model.l2_x(F.dropout(h1, train=True)) + model.l2_h(state['h2'])
     c2, h2 = F.lstm(state['c2'], h2_in)
     y = model.l3(h2)
 
     state = {'c1': c1, 'h1': h1, 'c2': c2, 'h2': h2}
     return state, F.softmax_cross_entropy(y, t)
-
 
 def make_initial_state(batchsize=batchsize, train=True):
     return {name: chainer.Variable(mod.zeros((batchsize, n_units),
@@ -94,11 +109,7 @@ def make_initial_state(batchsize=batchsize, train=True):
             for name in ('c1', 'h1', 'c2', 'h2')}
 
 # Setup optimizer
-#optimizer = optimizers.SGD(lr=1.)
-#optimizer = optimizers.Adam()
-optimizer = optimizers.AdaGrad()
-#optimizer = optimizers.AdaDelta()
-#optimizer = optimizers.RMSprop()
+optimizer = optimizers.Adam()
 optimizer.setup(model.collect_parameters())
 
 # Evaluation routine
@@ -110,7 +121,6 @@ def evaluate(dataset):
         y_batch = dataset[i + 1:i + 2]
         state, loss = forward_one_step(x_batch, y_batch, state, train=False)
         sum_log_perp += loss.data.reshape(())
-
     return math.exp(cuda.to_cpu(sum_log_perp) / (dataset.size - 1))
 
 # Learning loop
@@ -157,22 +167,15 @@ for i in six.moves.range(jump * n_epoch):
         # save model
         if perp < best_perplexity:
             best_perplexity = perp
-            pk.dump(model, open("./models_AdaGrad_BL30_res562699/model"+str(i)+".pkl","wb"))
+            pk.dump(model, open("./models_continue_supersmall/model"+str(i)+".pkl","wb"))
 
-    if (i + 1) % jump == 0:
+    if (i + 1) % 1000 == 0:#(i + 1) % jump == 0:
         epoch += 1
         print('evaluate')
         now = time.time()
         perp = evaluate(valid_data)
         print('epoch {} validation perplexity: {:.2f}'.format(epoch, perp))
         cur_at += time.time() - now  # skip time of evaluation
-
-        # if using sgd
-        """
-        if epoch >= 6:
-            optimizer.lr /= 1.2
-            print('learning rate =', optimizer.lr)
-        """
     sys.stdout.flush()
 
 # Evaluate on test dataset
@@ -181,6 +184,6 @@ test_perp = evaluate(test_data)
 print('test perplexity:', test_perp)
 
 #save model
-pk.dump(model, open("./models_AdaGrad_BL30_res562699/model.pkl","wb"))
-pk.dump(vocab, open("./models_AdaGrad_BL30_res562699/vocab.pkl","wb"))
-pk.dump(n_units, open("./models_AdaGrad_BL30_res562699/units.pkl","wb"))
+pk.dump(model, open("./models_continue_supersmall/model.pkl","wb"))
+pk.dump(vocab, open("./models_continue_supersmall/vocab.pkl","wb"))
+pk.dump(n_units, open("./models_continue/units.pkl","wb"))
